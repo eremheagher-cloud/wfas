@@ -1,0 +1,193 @@
+name: PC criado pelo rafael
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: "Instance Number (1-10)"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 360
+
+    steps:
+      - name: Check Windows Version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, OSArchitecture
+
+          Write-Host "Runner: windows-11-vs2026-arm"
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = "$env:TEMP\tailscale-setup.exe"
+
+          Invoke-WebRequest `
+            -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe' `
+            -OutFile $installer
+
+          Start-Process `
+            -FilePath $installer `
+            -ArgumentList '/quiet' `
+            -Wait
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $tailscale)) {
+            throw 'Tailscale installation failed.'
+          }
+
+          Write-Host 'Tailscale installed.'
+
+      - name: Connect Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw 'Missing TAILSCALE_AUTH_KEY in repository Actions secrets.'
+          }
+
+          & $tailscale up `
+            "--auth-key=$env:TAILSCALE_AUTH_KEY" `
+            "--hostname=pc-rafael-${{ inputs.instance_number }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tailscale authentication failed: code $LASTEXITCODE"
+          }
+
+          Start-Sleep -Seconds 5
+          & $tailscale status
+
+          $ipOutput = & $tailscale ip -4
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not retrieve the Tailscale IP.'
+          }
+
+          $ip = ($ipOutput | Select-Object -First 1).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            throw 'Tailscale did not assign an IPv4 address.'
+          }
+
+          "TAILSCALE_IP=$ip" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "Tailscale IP assigned: $ip"
+
+      - name: Configure Remote Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Set-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' `
+            -Name fDenyTSConnections `
+            -Value 0
+
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+
+          Write-Host 'RDP configuration completed.'
+
+      - name: Create Rafael Account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $Username = 'Rafael'
+          $Password = 'Wl7mX#2026@Pc!'
+
+          $SecurePassword = ConvertTo-SecureString `
+            $Password -AsPlainText -Force
+
+          $User = Get-LocalUser -Name $Username `
+            -ErrorAction SilentlyContinue
+
+          if ($null -eq $User) {
+            New-LocalUser `
+              -Name $Username `
+              -Password $SecurePassword `
+              -Description 'Windows account Rafael' `
+              -ErrorAction Stop | Out-Null
+          }
+          else {
+            Set-LocalUser `
+              -Name $Username `
+              -Password $SecurePassword `
+              -ErrorAction Stop
+          }
+
+          Enable-LocalUser -Name $Username
+
+          Add-LocalGroupMember `
+            -Group 'Remote Desktop Users' `
+            -Member $Username `
+            -ErrorAction SilentlyContinue
+
+          Write-Host 'Rafael account configured.'
+
+      - name: Test RDP Listener
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $listener = Get-NetTCPConnection `
+            -State Listen `
+            -LocalPort 3389 `
+            -ErrorAction SilentlyContinue
+
+          if ($listener) {
+            Write-Host 'RDP port 3389 is listening.'
+          }
+          else {
+            Write-Host 'RDP port 3389 is not listening.'
+          }
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $tailscale status
+
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+
+      - name: Show Connection Details
+        if: ${{ success() }}
+        shell: pwsh
+        run: |
+          Write-Host ''
+          Write-Host '======= VIRTUAL PC DETAILS ======='
+          Write-Host 'Account: Rafael'
+          Write-Host 'Password: Wl7mX#2026@Pc!'
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host 'RDP port: 3389'
+          Write-Host '=================================='
+
+      - name: Keep Runner Active
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endTime = (Get-Date).AddHours(5)
+
+          while ((Get-Date) -lt $endTime) {
+            Write-Host "Runner active: $(Get-Date -Format 'HH:mm:ss')"
+            Start-Sleep -Seconds 60
+          }
+
+          Write-Host 'Wait period completed.'
